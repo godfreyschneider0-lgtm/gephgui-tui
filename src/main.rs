@@ -51,9 +51,10 @@ fn main() -> anyhow::Result<()> {
             println!("                    sessions              — show active+draining sessions");
             println!("                    logs [N]              — last N log lines (default 20)");
             println!("                    account               — show account info");
+            println!("                    redeem <code>         — redeem a voucher code to extend Plus");
             println!("    -h, --help        Show this help.\n");
             println!("TUI KEYS:");
-            println!("    1-4   tabs (Status / Regions / Config / Debug)");
+            println!("    1-5   tabs (Status / Regions / Config / Debug / Plus)");
             println!("    s/x   start / stop connection");
             println!("    e     edit Account ID      p  edit SOCKS5 port      h  edit HTTP port");
             println!(
@@ -86,6 +87,7 @@ fn main() -> anyhow::Result<()> {
                 "sessions" => ctl_sessions().await,
                 "logs" => ctl_logs(args.get(3).map(|s| s.as_str())).await,
                 "account" => ctl_account().await,
+                "redeem" => ctl_redeem(args.get(3).map(|s| s.as_str())).await,
                 _ => {
                     eprintln!("Usage: geph-tui --ctl <command> [args]");
                     eprintln!();
@@ -97,6 +99,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("    sessions              show active+draining sessions");
                     eprintln!("    logs [N]              last N log lines (default 20)");
                     eprintln!("    account               show account info");
+                    eprintln!("    redeem <code>         redeem a voucher code to extend Plus");
                     std::process::exit(1);
                 }
             }
@@ -162,6 +165,14 @@ async fn run_app<B: Backend>(
             .borders(Borders::ALL)
             .title("HTTP Proxy Port"),
     );
+    state
+        .redeem_textarea
+        .set_block(Block::default().borders(Borders::ALL).title("Redeem Code"));
+    state.promo_textarea.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Promo Code (optional)"),
+    );
 
     let prefs = state.to_prefs();
     if !prefs.secret.is_empty() && !daemon_running().await {
@@ -192,6 +203,9 @@ async fn run_app<B: Backend>(
         }
 
         let mut user_level = state.last_detected_level;
+        state.poll_plus_prev_expires = state
+            .plus_expires_days
+            .map(|d| (d.round() as i64).max(0) as u64);
         if state.is_running {
             let secret = state.secret_textarea.lines().join("");
             if !secret.is_empty() {
@@ -232,6 +246,44 @@ async fn run_app<B: Backend>(
                     }
                 });
                 state.last_detected_level = user_level;
+            }
+        }
+
+        if let Some(deadline) = state.poll_plus_until {
+            if deadline.elapsed() < Duration::from_secs(300) {
+                let new_days = state
+                    .plus_expires_days
+                    .map(|d| (d.round() as i64).max(0) as u64)
+                    .unwrap_or(0);
+                if new_days > state.poll_plus_prev_expires.unwrap_or(0) {
+                    state.plus_action_status = "Plus subscription extended! \u{2713}".into();
+                    state.poll_plus_until = None;
+                }
+            } else {
+                state.poll_plus_until = None;
+            }
+        }
+
+        if state.tab == state::TabIdx::Plus && state.is_running {
+            if state.price_points.is_empty() {
+                if let Ok(Ok(val)) = ControlClient(DaemonRpcTransport)
+                    .broker_rpc("raw_price_points".into(), vec![])
+                    .await
+                {
+                    if let Ok(pp) = serde_json::from_value::<Vec<(u32, u32)>>(val) {
+                        state.price_points = pp;
+                    }
+                }
+            }
+            if state.payment_methods.is_empty() {
+                if let Ok(Ok(val)) = ControlClient(DaemonRpcTransport)
+                    .broker_rpc("payment_methods".into(), vec![])
+                    .await
+                {
+                    if let Ok(pm) = serde_json::from_value::<Vec<String>>(val) {
+                        state.payment_methods = pm;
+                    }
+                }
             }
         }
 
@@ -595,6 +647,55 @@ async fn ctl_account() -> anyhow::Result<()> {
     if let Some(bw) = ui.bw_consumption {
         println!("bw_used_mb={}", bw.mb_used);
         println!("bw_limit_mb={}", bw.mb_limit);
+    }
+    Ok(())
+}
+
+async fn ctl_redeem(code_arg: Option<&str>) -> anyhow::Result<()> {
+    require_daemon().await?;
+    let code = match code_arg {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            eprintln!("Usage: geph-tui --ctl redeem <code>");
+            std::process::exit(2);
+        }
+    };
+    let prefs = TuiPrefs::load();
+    if prefs.secret.is_empty() {
+        anyhow::bail!("no account configured; start the TUI and log in first");
+    }
+    let url_val = ControlClient(DaemonRpcTransport)
+        .broker_rpc(
+            "redeem_voucher".into(),
+            vec![serde_json::json!(prefs.secret), serde_json::json!(code)],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("broker_rpc transport error: {e:?}"))?
+        .map_err(|e| anyhow::anyhow!("redeem rejected: {e}"))?;
+    let days: i32 = serde_json::from_value(url_val)
+        .map_err(|e| anyhow::anyhow!("failed to deserialize days (i32): {e}"))?;
+    println!("Redeemed successfully. {} days added.", days);
+    let cred = geph5_broker_protocol::Credential::Secret(prefs.secret.clone());
+    let cred_val = serde_json::to_value(&cred).unwrap_or(serde_json::Value::Null);
+    if let Ok(Ok(ui_val)) = ControlClient(DaemonRpcTransport)
+        .broker_rpc("get_user_info_by_cred".into(), vec![cred_val])
+        .await
+    {
+        if let Ok(Some(ui)) =
+            serde_json::from_value::<Option<geph5_broker_protocol::UserInfo>>(ui_val)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match ui.plus_expires_unix {
+                Some(exp) if exp > now => {
+                    let days_left = (exp - now) as f64 / 86400.0;
+                    println!("Plus now expires in {:.1} days.", days_left);
+                }
+                _ => println!("Plus status: not plus"),
+            }
+        }
     }
     Ok(())
 }
