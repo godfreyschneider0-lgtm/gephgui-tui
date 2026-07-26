@@ -1,6 +1,7 @@
 mod config;
 mod debug;
 mod nodes;
+mod plus;
 mod status;
 
 use ratatui::{
@@ -26,7 +27,7 @@ pub fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState<'_>) {
         )
         .split(f.area());
 
-    let titles = vec!["1: Status", "2: Nodes", "3: Config", "4: Debug"]
+    let titles = vec!["1: Status", "2: Nodes", "3: Config", "4: Debug", "5: Plus"]
         .into_iter()
         .map(|t| Line::from(t))
         .collect::<Vec<_>>();
@@ -36,6 +37,7 @@ pub fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState<'_>) {
             TabIdx::Nodes => 1,
             TabIdx::Config => 2,
             TabIdx::Debug => 3,
+            TabIdx::Plus => 4,
         })
         .block(Block::default().title("Tabs").borders(Borders::ALL))
         .highlight_style(
@@ -50,9 +52,10 @@ pub fn draw_ui(f: &mut ratatui::Frame, state: &mut AppState<'_>) {
         TabIdx::Nodes => nodes::draw(f, state, chunks[1]),
         TabIdx::Config => config::draw(f, state, chunks[1]),
         TabIdx::Debug => debug::draw(f, state, chunks[1]),
+        TabIdx::Plus => plus::draw(f, state, chunks[1]),
     }
 
-    let controls = Paragraph::new("Press 's' Start | 'x' Stop | 'q' Quit | '1'-'4' Tabs").block(
+    let controls = Paragraph::new("Press 's' Start | 'x' Stop | 'q' Quit | '1'-'5' Tabs").block(
         Block::default()
             .title("Global Controls")
             .borders(Borders::ALL),

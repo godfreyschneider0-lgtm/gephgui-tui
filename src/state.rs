@@ -40,6 +40,7 @@ pub enum TabIdx {
     Nodes,
     Config,
     Debug,
+    Plus,
 }
 
 #[derive(PartialEq)]
@@ -48,6 +49,8 @@ pub enum Focus {
     Secret,
     SocksPort,
     HttpPort,
+    RedeemCode,
+    PromoCode,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -132,6 +135,19 @@ pub struct AppState<'a> {
     pub status_scroll: u16,
 
     pub update_info: Option<(String, std::path::PathBuf)>,
+
+    // Plus tab (session-only, not persisted)
+    pub redeem_textarea: TextArea<'a>,
+    pub promo_textarea: TextArea<'a>,
+    pub plus_action_status: String,
+    pub plus_action_in_progress: bool,
+    pub plus_url_to_show: Option<String>,
+    pub selected_price_idx: usize,
+    pub selected_method_idx: usize,
+    pub price_points: Vec<(u32, u32)>, // (days, cents)
+    pub payment_methods: Vec<String>,
+    pub poll_plus_until: Option<std::time::Instant>,
+    pub poll_plus_prev_expires: Option<u64>, // previous plus_expires_unix to detect advance
 }
 
 impl<'a> AppState<'a> {
@@ -187,6 +203,18 @@ impl<'a> AppState<'a> {
             status_scroll: 0,
 
             update_info: None,
+
+            redeem_textarea: TextArea::default(),
+            promo_textarea: TextArea::default(),
+            plus_action_status: String::new(),
+            plus_action_in_progress: false,
+            plus_url_to_show: None,
+            selected_price_idx: 0,
+            selected_method_idx: 0,
+            price_points: Vec::new(),
+            payment_methods: Vec::new(),
+            poll_plus_until: None,
+            poll_plus_prev_expires: None,
         }
     }
 
