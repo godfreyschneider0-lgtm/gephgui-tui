@@ -12,6 +12,8 @@ pub fn handle_focused_input<'a>(state: &mut AppState<'a>, key: KeyEvent) {
             state.secret_textarea.set_style(Style::default());
             state.socks_textarea.set_style(Style::default());
             state.http_textarea.set_style(Style::default());
+            state.redeem_textarea.set_style(Style::default());
+            state.promo_textarea.set_style(Style::default());
         }
         _ => match state.focus {
             Focus::Secret => {
@@ -22,6 +24,12 @@ pub fn handle_focused_input<'a>(state: &mut AppState<'a>, key: KeyEvent) {
             }
             Focus::HttpPort => {
                 state.http_textarea.input(key);
+            }
+            Focus::RedeemCode => {
+                state.redeem_textarea.input(key);
+            }
+            Focus::PromoCode => {
+                state.promo_textarea.input(key);
             }
             _ => {}
         },
@@ -37,6 +45,7 @@ pub async fn handle_global_key<'a>(state: &mut AppState<'a>, key: KeyEvent) -> b
         KeyCode::Char('2') => state.tab = TabIdx::Nodes,
         KeyCode::Char('3') => state.tab = TabIdx::Config,
         KeyCode::Char('4') => state.tab = TabIdx::Debug,
+        KeyCode::Char('5') => state.tab = TabIdx::Plus,
 
         KeyCode::Char('s') => {
             if !state.is_running {
@@ -193,6 +202,155 @@ pub async fn handle_global_key<'a>(state: &mut AppState<'a>, key: KeyEvent) -> b
         }
         KeyCode::Char('d') if state.tab == TabIdx::Debug => {
             state.enable_debug_log = !state.enable_debug_log;
+        }
+
+        KeyCode::Char('v') if state.tab == TabIdx::Plus => {
+            state.focus = Focus::RedeemCode;
+            state
+                .redeem_textarea
+                .set_style(Style::default().fg(Color::Yellow));
+        }
+        KeyCode::Char('o') if state.tab == TabIdx::Plus => {
+            state.focus = Focus::PromoCode;
+            state
+                .promo_textarea
+                .set_style(Style::default().fg(Color::Yellow));
+        }
+        KeyCode::Char('c') if state.tab == TabIdx::Plus => {
+            state.plus_url_to_show = None;
+            state.plus_action_status = "URL cleared.".into();
+        }
+        KeyCode::Up if state.tab == TabIdx::Plus => {
+            if !state.price_points.is_empty() {
+                let len = state.price_points.len();
+                state.selected_price_idx = (state.selected_price_idx + len - 1) % len;
+            }
+        }
+        KeyCode::Down if state.tab == TabIdx::Plus => {
+            if !state.price_points.is_empty() {
+                let len = state.price_points.len();
+                state.selected_price_idx = (state.selected_price_idx + 1) % len;
+            }
+        }
+        KeyCode::Left if state.tab == TabIdx::Plus => {
+            if !state.payment_methods.is_empty() {
+                let len = state.payment_methods.len();
+                state.selected_method_idx = (state.selected_method_idx + len - 1) % len;
+            }
+        }
+        KeyCode::Right if state.tab == TabIdx::Plus => {
+            if !state.payment_methods.is_empty() {
+                let len = state.payment_methods.len();
+                state.selected_method_idx = (state.selected_method_idx + 1) % len;
+            }
+        }
+        KeyCode::Enter
+            if state.tab == TabIdx::Plus
+                && state.focus == Focus::None
+                && !state.plus_action_in_progress =>
+        {
+            let secret = state.secret_textarea.lines().join("");
+            let code = state.redeem_textarea.lines().join("");
+            if secret.is_empty() {
+                state.plus_action_status = "Login first.".into();
+                return false;
+            }
+            if code.is_empty() {
+                state.plus_action_status = "Enter a redeem code first.".into();
+                return false;
+            }
+            state.plus_action_in_progress = true;
+            state.plus_action_status = "Redeeming…".into();
+            match ControlClient(DaemonRpcTransport)
+                .broker_rpc(
+                    "redeem_voucher".into(),
+                    vec![serde_json::json!(secret), serde_json::json!(code)],
+                )
+                .await
+            {
+                Ok(Ok(val)) => {
+                    let days: i32 = serde_json::from_value(val).unwrap_or(0);
+                    state.plus_action_status =
+                        format!("Redeemed! {} days added. Refreshing…", days);
+                    state.plus_url_to_show = None;
+                    state.poll_plus_prev_expires = state
+                        .plus_expires_days
+                        .map(|d| (d.round() as i64).max(0) as u64);
+                    state.poll_plus_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    state.plus_action_in_progress = false;
+                }
+                Ok(Err(msg)) => {
+                    state.plus_action_status = format!("Redeem failed: {}", msg);
+                    state.plus_action_in_progress = false;
+                }
+                Err(e) => {
+                    state.plus_action_status = format!("RPC error: {e:#}");
+                    state.plus_action_in_progress = false;
+                }
+            }
+        }
+        KeyCode::Char('b')
+            if state.tab == TabIdx::Plus
+                && state.focus == Focus::None
+                && !state.plus_action_in_progress =>
+        {
+            let secret = state.secret_textarea.lines().join("");
+            if secret.is_empty() {
+                state.plus_action_status = "Login first.".into();
+                return false;
+            }
+            if state.price_points.is_empty() || state.payment_methods.is_empty() {
+                state.plus_action_status = "Loading prices, try again…".into();
+                return false;
+            }
+            let days = state.price_points[state.selected_price_idx].0;
+            let method = state.payment_methods[state.selected_method_idx].clone();
+            let promo = state.promo_textarea.lines().join("");
+            let method_arg = if promo.is_empty() {
+                method
+            } else {
+                format!("{}+++{}", method, promo)
+            };
+            state.plus_action_in_progress = true;
+            state.plus_action_status = "Creating payment URL…".into();
+            match ControlClient(DaemonRpcTransport)
+                .broker_rpc(
+                    "create_payment".into(),
+                    vec![
+                        serde_json::json!(secret),
+                        serde_json::json!(days),
+                        serde_json::json!(method_arg),
+                    ],
+                )
+                .await
+            {
+                Ok(Ok(val)) => {
+                    let url: String = serde_json::from_value(val).unwrap_or_default();
+                    if url.is_empty() {
+                        state.plus_action_status = "Empty URL returned.".into();
+                    } else {
+                        state.plus_url_to_show = Some(url);
+                        state.plus_action_status =
+                            "URL ready below — copy into a browser.".into();
+                        state.poll_plus_prev_expires = state
+                            .plus_expires_days
+                            .map(|d| (d.round() as i64).max(0) as u64);
+                        state.poll_plus_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_secs(300),
+                        );
+                    }
+                    state.plus_action_in_progress = false;
+                }
+                Ok(Err(msg)) => {
+                    state.plus_action_status = format!("Failed: {}", msg);
+                    state.plus_action_in_progress = false;
+                }
+                Err(e) => {
+                    state.plus_action_status = format!("RPC error: {e:#}");
+                    state.plus_action_in_progress = false;
+                }
+            }
         }
         _ => {}
     }
